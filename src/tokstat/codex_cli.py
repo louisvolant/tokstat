@@ -363,7 +363,8 @@ def _collect_all_exchanges(cutoff: datetime, tool_filter: str | None = None,
 
 # ─── Main (aggregated overview) ──────────────────────────────────────────────
 
-def main(period_name: str | None = None, tool_filter: str | None = None):
+def main(period_name: str | None = None, tool_filter: str | None = None,
+         by_session: bool = False):
     print(f"\n{BOLD} Token Usage — Codex{RESET}")
     print(f"{DIM}  Loading pricing from LiteLLM...{RESET}")
     load_pricing()
@@ -403,7 +404,8 @@ def main(period_name: str | None = None, tool_filter: str | None = None):
 
     exchanges, _ = _collect_all_exchanges(cutoff, tool_filter, cutoff_end)
     show_overview_tables(records, speed_records, cutoff, cutoff_end, period_label,
-                         tool_filter, all_exchanges=exchanges)
+                         tool_filter, all_exchanges=exchanges,
+                         by_session=by_session)
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -414,7 +416,7 @@ _TOOL_ALIASES = {
 
 _KNOWN_FLAGS = {
     "--help", "-h", "--version", "-V", "--prompts", "-p", "--anomalies",
-    "--plan", "--activity", "--total", "--impact", "--export", "--period", "--since", "--tool",
+    "--plan", "--activity", "--total", "--impact", "--by-session", "--export", "--period", "--since", "--tool",
 }
 
 
@@ -448,6 +450,7 @@ def show_help():
   codex-token-usage --activity                 Activity calendar (GitHub-style, by day)
   codex-token-usage --total                    Compact totals (tokens + cost + data span)
   codex-token-usage --impact                   Energy & CO₂ estimate (EcoLogits)
+  codex-token-usage --by-session               Overview + per-session table (top 20 by cost)
   codex-token-usage --plan                     Cost breakdown + plan recommendation + optimization tips
   codex-token-usage --export   [file.json]     Export all exchanges to JSON
   codex-token-usage --help     [-h]            This help
@@ -521,7 +524,7 @@ def cli():
             out = args[idx + 1]
         export_conversations(_collect_all_exchanges, out, period, tool)
     else:
-        main(period, tool)
+        main(period, tool, by_session="--by-session" in args)
 
     print_update_notice(__version__)
 

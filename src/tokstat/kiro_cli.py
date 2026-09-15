@@ -183,7 +183,8 @@ def _collect_all_exchanges(cutoff: datetime, tool_filter: str | None = None,
 
 # ─── Main (aggregated overview) ──────────────────────────────────────────────
 
-def main(period_name: str | None = None, tool_filter: str | None = None):
+def main(period_name: str | None = None, tool_filter: str | None = None,
+         by_session: bool = False):
     print(f"\n{BOLD} Token Usage — Kiro{RESET}")
     print(f"{DIM}  Loading pricing from LiteLLM...{RESET}")
     load_pricing()
@@ -217,7 +218,8 @@ def main(period_name: str | None = None, tool_filter: str | None = None):
 
     exchanges, _ = _collect_all_exchanges(cutoff, tool_filter, cutoff_end)
     show_overview_tables(records, [], cutoff, cutoff_end, period_label,
-                         tool_filter, all_exchanges=exchanges)
+                         tool_filter, all_exchanges=exchanges,
+                         by_session=by_session)
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
@@ -226,7 +228,7 @@ _TOOL_ALIASES = {"kiro": "Kiro"}
 
 _KNOWN_FLAGS = {
     "--help", "-h", "--version", "-V", "--prompts", "-p", "--anomalies",
-    "--plan", "--activity", "--total", "--impact", "--export", "--period", "--since", "--tool",
+    "--plan", "--activity", "--total", "--impact", "--by-session", "--export", "--period", "--since", "--tool",
 }
 
 
@@ -257,6 +259,7 @@ def show_help():
   kiro-token-usage --activity                 Activity calendar (GitHub-style, by day)
   kiro-token-usage --total                    Compact totals (tokens + cost + data span)
   kiro-token-usage --impact                   Energy & CO₂ estimate (EcoLogits)
+  kiro-token-usage --by-session               Overview + per-session table (top 20 by cost)
   kiro-token-usage --plan                     Cost breakdown + optimization tips
   kiro-token-usage --export   [file.json]     Export all exchanges to JSON
   kiro-token-usage --help     [-h]            This help
@@ -311,7 +314,7 @@ def cli():
             out = args[idx + 1]
         export_conversations(_collect_all_exchanges, out, period, tool)
     else:
-        main(period, tool)
+        main(period, tool, by_session="--by-session" in args)
 
     print_update_notice(__version__)
 
