@@ -10,3 +10,7 @@ __pycache__/
 # the appropriate --import flag instead.
 *.zip
 conversations.json
+*.dump
+node_modules/
+package.json
+package-lock.json

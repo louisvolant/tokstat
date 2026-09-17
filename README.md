@@ -6,6 +6,7 @@ CLI toolkit to aggregate and analyze AI coding assistant token consumption. Each
 
 ## Changelog
 
+- **1.13.0** — `--export` entries now include **`session`** (the source transcript id / session name), **`cwd`** (the working directory the session ran in) and **`worktree`** (the git main worktree `cwd` resolves to), so exports carry the full provenance of each exchange.
 - **1.12.1** — `--by-session` now lists **every** session (no `… +N more` truncation) — the table header shows `all N, by cost`.
 - **1.12.0** — New **`--by-session`** flag on the default overview (all tools + unified `tokstat`): adds a **Consumption by session** table under the by-project table — the heaviest conversations by cost, with tool, project, prompts/turns, tokens and cost. The default overview is unchanged unless the flag is passed; works with `--watch` too.
 - **1.11.0** — `--impact` gains a **By workspace** breakdown: energy/CO₂ grouped **per project** (the repo/dir the work ran in), with each workspace's distinct-session count — sitting alongside the per-date Trend and per-session tables (top 15 + `… +N more`). Workspaces group sessions across tools.
@@ -378,7 +379,10 @@ claude-token-usage --plan --period all
 
 ### `--export` — conversation export
 
-Exports all exchanges to a JSON file.
+Exports all exchanges to a JSON file. Each entry carries its `session` (the
+source transcript id), `cwd` (the working directory the session ran in) and
+`worktree` (the git main worktree that `cwd` resolves to — same as `cwd` unless
+the session ran in a linked worktree).
 
 ```sh
 claude-token-usage --export
@@ -389,6 +393,9 @@ claude-token-usage --export out.json --period "7 days"
 {
   "tool": "Claude Code",
   "model": "claude-opus-4-6",
+  "session": "e25ea4e5-4de5-40ca-be90-f99371b220be",
+  "cwd": "/Users/me/Code/tokstat/.worktrees/feature-x",
+  "worktree": "/Users/me/Code/tokstat",
   "timestamp": "2026-04-08T...",
   "user": "the user prompt text",
   "assistant": ["response 1", "response 2"],
