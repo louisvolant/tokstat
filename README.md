@@ -6,6 +6,7 @@ CLI toolkit to aggregate and analyze AI coding assistant token consumption. Each
 
 ## Changelog
 
+- **1.15.0** — Context/compaction tracking now covers **Codex** too: `context_tokens` (peak from `token_count`) and `compactions` (each `compacted` event, with `pre_tokens` → `post_tokens` derived from the surrounding token counts). Codex doesn't record a `trigger` or duration, so those stay `null` and the `--prompts` marker reads `⇩ 187K→36K` (no trigger) vs Claude Code's `⇩auto 1.0M→10K`.
 - **1.14.0** — Context tracking (Claude Code): `--export` entries now carry **`context_tokens`** (peak context size the exchange reached — input + cache read + cache write) and **`compactions`** (each auto-compact / `/compact` event with `trigger`, `pre_tokens` → `post_tokens`, duration and timestamp). `--prompts` gains matching **Context** and **Compaction** columns (e.g. `⇩auto 1.0M→10.4K`). Other tools don't expose compaction, so the fields stay empty there.
 - **1.13.0** — `--export` entries now include **`session`** (the source transcript id / session name), **`cwd`** (the working directory the session ran in) and **`worktree`** (the git main worktree `cwd` resolves to), so exports carry the full provenance of each exchange.
 - **1.12.1** — `--by-session` now lists **every** session (no `… +N more` truncation) — the table header shows `all N, by cost`.
@@ -383,10 +384,12 @@ claude-token-usage --plan --period all
 Exports all exchanges to a JSON file. Each entry carries its `session` (the
 source transcript id), `cwd` (the working directory the session ran in) and
 `worktree` (the git main worktree that `cwd` resolves to — same as `cwd` unless
-the session ran in a linked worktree). For Claude Code it also carries
-`context_tokens` (the peak context size the exchange reached) and `compactions`
-(each auto-compact / `/compact` event, with `pre_tokens` → `post_tokens`); these
-same signals appear as the **Context** and **Compaction** columns in `--prompts`.
+the session ran in a linked worktree). For **Claude Code and Codex** it also
+carries `context_tokens` (the peak context size the exchange reached) and
+`compactions` (each compaction event, with `pre_tokens` → `post_tokens`; Claude
+Code also gives `trigger` auto/manual and duration, Codex leaves those `null`);
+these same signals appear as the **Context** and **Compaction** columns in
+`--prompts`.
 
 ```sh
 claude-token-usage --export
