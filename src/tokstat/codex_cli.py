@@ -312,7 +312,7 @@ def _extract_exchanges_codex(jsonl_path: str) -> list[dict]:
                 "user_text": text, "assistant_texts": [], "tool_errors": [],
                 "tools_used": {}, "num_turns": 0,
                 "model": _label(current_model, current_effort),
-                "project": current_cwd, "ts": ts,
+                "project": current_cwd, "ts": ts, "last_ts": ts,
                 "tokens": {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
                 "cost": 0.0,
                 "context_peak": 0, "compactions": pending_compactions,
@@ -320,6 +320,8 @@ def _extract_exchanges_codex(jsonl_path: str) -> list[dict]:
             pending_compactions = []
 
         elif rec_type == "response_item" and payload.get("role") == "assistant" and current:
+            if ts:
+                current["last_ts"] = ts
             current["num_turns"] += 1
             for c in payload.get("content", []):
                 if isinstance(c, dict) and c.get("type") == "output_text":
@@ -328,6 +330,8 @@ def _extract_exchanges_codex(jsonl_path: str) -> list[dict]:
                         current["assistant_texts"].append(t)
 
         elif rec_type == "event_msg" and payload.get("type") == "token_count" and current:
+            if ts:
+                current["last_ts"] = ts
             info = payload.get("info") or {}
             last = info.get("last_token_usage") or {}
             if last:
@@ -359,6 +363,10 @@ def _extract_exchanges_codex(jsonl_path: str) -> list[dict]:
 
     if current:
         exchanges.append(current)
+    for ex in exchanges:
+        start, end = ex.get("ts"), ex.pop("last_ts", None)
+        if start and end:
+            ex["duration_s"] = max((end - start).total_seconds(), 0.0)
     return exchanges
 
 

@@ -6,6 +6,7 @@ CLI toolkit to aggregate and analyze AI coding assistant token consumption. Each
 
 ## Changelog
 
+- **1.16.0** — Exchange **duration** (Claude Code + Codex): `--export` entries carry **`duration_s`** (wall-clock seconds from the prompt to the exchange's last activity) and `--prompts` gains a **Dur** column (`4s` · `3m` · `1h12m`). Note it's wall-clock, so an exchange left idle mid-way counts the gap.
 - **1.15.0** — Context/compaction tracking now covers **Codex** too: `context_tokens` (peak from `token_count`) and `compactions` (each `compacted` event, with `pre_tokens` → `post_tokens` derived from the surrounding token counts). Codex doesn't record a `trigger` or duration, so those stay `null` and the `--prompts` marker reads `⇩ 187K→36K` (no trigger) vs Claude Code's `⇩auto 1.0M→10K`.
 - **1.14.0** — Context tracking (Claude Code): `--export` entries now carry **`context_tokens`** (peak context size the exchange reached — input + cache read + cache write) and **`compactions`** (each auto-compact / `/compact` event with `trigger`, `pre_tokens` → `post_tokens`, duration and timestamp). `--prompts` gains matching **Context** and **Compaction** columns (e.g. `⇩auto 1.0M→10.4K`). Other tools don't expose compaction, so the fields stay empty there.
 - **1.13.0** — `--export` entries now include **`session`** (the source transcript id / session name), **`cwd`** (the working directory the session ran in) and **`worktree`** (the git main worktree `cwd` resolves to), so exports carry the full provenance of each exchange.
@@ -407,6 +408,7 @@ claude-token-usage --export out.json --period "7 days"
   "user": "the user prompt text",
   "assistant": ["response 1", "response 2"],
   "turns": 25,
+  "duration_s": 182.4,
   "context_tokens": 999900,
   "compactions": [
     {"trigger": "auto", "pre_tokens": 1000000, "post_tokens": 10400,
