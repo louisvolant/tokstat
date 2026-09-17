@@ -6,6 +6,7 @@ CLI toolkit to aggregate and analyze AI coding assistant token consumption. Each
 
 ## Changelog
 
+- **1.14.0** — Context tracking (Claude Code): `--export` entries now carry **`context_tokens`** (peak context size the exchange reached — input + cache read + cache write) and **`compactions`** (each auto-compact / `/compact` event with `trigger`, `pre_tokens` → `post_tokens`, duration and timestamp). `--prompts` gains matching **Context** and **Compaction** columns (e.g. `⇩auto 1.0M→10.4K`). Other tools don't expose compaction, so the fields stay empty there.
 - **1.13.0** — `--export` entries now include **`session`** (the source transcript id / session name), **`cwd`** (the working directory the session ran in) and **`worktree`** (the git main worktree `cwd` resolves to), so exports carry the full provenance of each exchange.
 - **1.12.1** — `--by-session` now lists **every** session (no `… +N more` truncation) — the table header shows `all N, by cost`.
 - **1.12.0** — New **`--by-session`** flag on the default overview (all tools + unified `tokstat`): adds a **Consumption by session** table under the by-project table — the heaviest conversations by cost, with tool, project, prompts/turns, tokens and cost. The default overview is unchanged unless the flag is passed; works with `--watch` too.
@@ -382,7 +383,10 @@ claude-token-usage --plan --period all
 Exports all exchanges to a JSON file. Each entry carries its `session` (the
 source transcript id), `cwd` (the working directory the session ran in) and
 `worktree` (the git main worktree that `cwd` resolves to — same as `cwd` unless
-the session ran in a linked worktree).
+the session ran in a linked worktree). For Claude Code it also carries
+`context_tokens` (the peak context size the exchange reached) and `compactions`
+(each auto-compact / `/compact` event, with `pre_tokens` → `post_tokens`); these
+same signals appear as the **Context** and **Compaction** columns in `--prompts`.
 
 ```sh
 claude-token-usage --export
@@ -400,6 +404,11 @@ claude-token-usage --export out.json --period "7 days"
   "user": "the user prompt text",
   "assistant": ["response 1", "response 2"],
   "turns": 25,
+  "context_tokens": 999900,
+  "compactions": [
+    {"trigger": "auto", "pre_tokens": 1000000, "post_tokens": 10400,
+     "duration_ms": 87092, "timestamp": "2026-04-17T20:21:40.697Z"}
+  ],
   "tools_used": {"Bash": 3, "Read": 7, "Edit": 2},
   "tool_errors": ["error message"]
 }
