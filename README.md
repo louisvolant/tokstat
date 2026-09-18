@@ -6,6 +6,7 @@ CLI toolkit to aggregate and analyze AI coding assistant token consumption. Each
 
 ## Changelog
 
+- **1.18.0** — `--tool-use` gains a **`--session <id>`** filter (Claude Code + Codex): scope the timeline to a single conversation by its session id — the full id or the short handle prefix that `--by-session` / the timeline show (e.g. `--session 019f6a75`). Each timeline line now also tags its `[session]`.
 - **1.17.0** — New **`--tool-use`** mode (Claude Code + Codex): a chronological **timeline of every tool call** — which tool, what it targeted (the file for Read/Edit/Write, the shell command for Bash/exec, the pattern/query for search), and when — grouped by conversation, with failed calls marked `✗`. Answers "which files and tools were touched, and in what order".
 - **1.16.0** — Exchange **duration** (Claude Code + Codex): `--export` entries carry **`duration_s`** (wall-clock seconds from the prompt to the exchange's last activity) and `--prompts` gains a **Dur** column (`4s` · `3m` · `1h12m`). Note it's wall-clock, so an exchange left idle mid-way counts the gap.
 - **1.15.0** — Context/compaction tracking now covers **Codex** too: `context_tokens` (peak from `token_count`) and `compactions` (each `compacted` event, with `pre_tokens` → `post_tokens` derived from the surrounding token counts). Codex doesn't record a `trigger` or duration, so those stay `null` and the `--prompts` marker reads `⇩ 187K→36K` (no trigger) vs Claude Code's `⇩auto 1.0M→10K`.
@@ -145,11 +146,13 @@ claude-token-usage -p --period "7 days"
 Chronological list of every tool call (Claude Code & Codex), grouped by
 conversation: the tool, what it targeted (file for Read/Edit/Write, command for
 Bash/exec, pattern/query for search) and the time it ran. Failed calls are
-marked `✗`. Filterable by `--period` / `--tool`.
+marked `✗`. Filterable by `--period` / `--tool`, and by **`--session <id>`** to
+scope to one conversation (full id or the short handle each line shows in `[…]`).
 
 ```sh
 claude-token-usage --tool-use --period "7 days"
 tokstat --tool-use --tool codex
+tokstat --tool-use --session 019f6a75
 ```
 
 ```

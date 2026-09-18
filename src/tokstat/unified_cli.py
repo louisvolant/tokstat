@@ -272,10 +272,19 @@ def watch(period_name: str | None, tool_filter: str | None, interval: float,
 
 _KNOWN_FLAGS = {
     "--help", "-h", "--version", "-V", "--prompts", "-p", "--anomalies",
-    "--plan", "--activity", "--total", "--impact", "--by-session", "--tool-use", "--export", "--period", "--since", "--tool", "--watch", "-w",
+    "--plan", "--activity", "--total", "--impact", "--by-session", "--tool-use", "--session", "--export", "--period", "--since", "--tool", "--watch", "-w",
 }
 
 _DEFAULT_WATCH_INTERVAL = 5.0
+
+
+def _arg_value(args, flag, default=None):
+    """Value following `flag` on the command line, or default."""
+    if flag in args:
+        i = args.index(flag)
+        if i + 1 < len(args) and not args[i + 1].startswith("-"):
+            return args[i + 1]
+    return default
 
 
 def _parse_watch_interval(args: list[str]) -> float | None:
@@ -407,7 +416,8 @@ def cli():
     elif "--impact" in args:
         show_impact(_collect_all_exchanges, period, tool, _parse_region(args))
     elif "--tool-use" in args:
-        show_tool_use(_collect_all_exchanges, period, tool)
+        show_tool_use(_collect_all_exchanges, period, tool,
+                      session_filter=_arg_value(args, "--session"))
     elif "--plan" in args:
         show_plan(_collect_all_exchanges, period, tool)
     elif "--export" in args:
