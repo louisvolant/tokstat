@@ -6,6 +6,7 @@ CLI toolkit to aggregate and analyze AI coding assistant token consumption. Each
 
 ## Changelog
 
+- **1.18.1** — Fix: the **per-session tables** (`--by-session` and `--impact`'s By-session) now show each session's **actual working directory** instead of `normalize_project()`'s git-repo-root collapse — so distinct sub-projects of one repo (e.g. `…/M5/m5agent`, `…/M5/m5agent-arduino`) no longer merge into a single row. The per-project / per-workspace aggregations still collapse by repo, as intended. A bare `~` means the session ran from your home directory.
 - **1.18.0** — `--tool-use` gains a **`--session <id>`** filter (Claude Code + Codex): scope the timeline to a single conversation by its session id — the full id or the short handle prefix that `--by-session` / the timeline show (e.g. `--session 019f6a75`). Each timeline line now also tags its `[session]`.
 - **1.17.0** — New **`--tool-use`** mode (Claude Code + Codex): a chronological **timeline of every tool call** — which tool, what it targeted (the file for Read/Edit/Write, the shell command for Bash/exec, the pattern/query for search), and when — grouped by conversation, with failed calls marked `✗`. Answers "which files and tools were touched, and in what order".
 - **1.16.0** — Exchange **duration** (Claude Code + Codex): `--export` entries carry **`duration_s`** (wall-clock seconds from the prompt to the exchange's last activity) and `--prompts` gains a **Dur** column (`4s` · `3m` · `1h12m`). Note it's wall-clock, so an exchange left idle mid-way counts the gap.
