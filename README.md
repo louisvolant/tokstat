@@ -6,6 +6,7 @@ CLI toolkit to aggregate and analyze AI coding assistant token consumption. Each
 
 ## Changelog
 
+- **1.17.0** — New **`--tool-use`** mode (Claude Code + Codex): a chronological **timeline of every tool call** — which tool, what it targeted (the file for Read/Edit/Write, the shell command for Bash/exec, the pattern/query for search), and when — grouped by conversation, with failed calls marked `✗`. Answers "which files and tools were touched, and in what order".
 - **1.16.0** — Exchange **duration** (Claude Code + Codex): `--export` entries carry **`duration_s`** (wall-clock seconds from the prompt to the exchange's last activity) and `--prompts` gains a **Dur** column (`4s` · `3m` · `1h12m`). Note it's wall-clock, so an exchange left idle mid-way counts the gap.
 - **1.15.0** — Context/compaction tracking now covers **Codex** too: `context_tokens` (peak from `token_count`) and `compactions` (each `compacted` event, with `pre_tokens` → `post_tokens` derived from the surrounding token counts). Codex doesn't record a `trigger` or duration, so those stay `null` and the `--prompts` marker reads `⇩ 187K→36K` (no trigger) vs Claude Code's `⇩auto 1.0M→10K`.
 - **1.14.0** — Context tracking (Claude Code): `--export` entries now carry **`context_tokens`** (peak context size the exchange reached — input + cache read + cache write) and **`compactions`** (each auto-compact / `/compact` event with `trigger`, `pre_tokens` → `post_tokens`, duration and timestamp). `--prompts` gains matching **Context** and **Compaction** columns (e.g. `⇩auto 1.0M→10.4K`). Other tools don't expose compaction, so the fields stay empty there.
@@ -137,6 +138,26 @@ Per-exchange breakdown: user text, model, turns, tokens (input/output/cache), to
 ```sh
 claude-token-usage --prompts
 claude-token-usage -p --period "7 days"
+```
+
+### `--tool-use` — tool-call timeline
+
+Chronological list of every tool call (Claude Code & Codex), grouped by
+conversation: the tool, what it targeted (file for Read/Edit/Write, command for
+Bash/exec, pattern/query for search) and the time it ran. Failed calls are
+marked `✗`. Filterable by `--period` / `--tool`.
+
+```sh
+claude-token-usage --tool-use --period "7 days"
+tokstat --tool-use --tool codex
+```
+
+```
+  Claude Code ~/Code/tokstat  328 calls
+    09-11 15:48 › sur quelle branche es-tu ?
+       15:48:15   Bash         git branch --show-current
+       15:48:19   Read         src/tokstat/_core.py
+       15:48:24   Edit         src/tokstat/_core.py
 ```
 
 ### `--anomalies` — technical anomaly detection
