@@ -33,6 +33,7 @@ from tokstat._core import (
     show_activity, show_total, show_impact, show_tool_use, tool_target,
     export_conversations, _parse_period, _parse_region, print_update_notice,
     print_retention_alerts,
+    tstamp,
 )
 
 TOOL_NAME = "Antigravity"
@@ -235,13 +236,13 @@ def _report_scan_health(total15: int, unparsed15: int, unpriced: set) -> None:
     tokens vanish. Warn (on stderr, so tables stay clean) when a large share of
     steps stop parsing, or when models resolve to names LiteLLM can't price."""
     if total15 >= 20 and unparsed15 / total15 > 0.5:
-        print(f"  {YELLOW}⚠ Antigravity: {unparsed15}/{total15} steps had no "
+        print(f"{tstamp()}  {YELLOW}⚠ Antigravity: {unparsed15}/{total15} steps had no "
               f"recognizable token structure — the on-disk format may have "
               f"changed; update tokstat or open an issue.{RESET}", file=sys.stderr)
     if unpriced:
         shown = ", ".join(sorted(unpriced)[:6])
         more = f" (+{len(unpriced) - 6} more)" if len(unpriced) > 6 else ""
-        print(f"  {YELLOW}⚠ Antigravity: no LiteLLM price for {len(unpriced)} "
+        print(f"{tstamp()}  {YELLOW}⚠ Antigravity: no LiteLLM price for {len(unpriced)} "
               f"model(s) — cost shown as $0: {shown}{more}.{RESET}", file=sys.stderr)
 
 

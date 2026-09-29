@@ -65,6 +65,7 @@ from tokstat._core import (
     export_conversations, _parse_period, _parse_region, print_update_notice,
     print_retention_alerts,
     compute_overview_state,
+    tstamp, timing_enabled, tstamp_scan,
 )
 
 
@@ -108,17 +109,23 @@ def _scan_all(tool_filter: str | None) -> tuple[list[dict], list[dict], list[tup
     for tool_name, scan_fn, speed_fn, _collect, data_path in _TOOLS:
         if tool_filter and tool_name != tool_filter:
             continue
+        t_scan = time.monotonic()
         try:
             tool_records = scan_fn()
         except Exception:
             tool_records = []
         records.extend(tool_records)
         counts.append((tool_name, len(tool_records), data_path))
+        tstamp_scan(tool_name, t_scan, len(tool_records))
+
         if speed_fn is not None:
+            t_speed = time.monotonic()
             try:
-                speed_records.extend(speed_fn())
+                speed = speed_fn()
+                speed_records.extend(speed)
             except Exception:
-                pass
+                speed = []
+            tstamp_scan(f"{tool_name} (speed)", t_speed, len(speed))
 
     return records, speed_records, counts
 
@@ -132,10 +139,12 @@ def _collect_all_exchanges(cutoff: datetime, tool_filter: str | None = None,
     for tool_name, _scan, _speed, collect_fn, _path in _TOOLS:
         if tool_filter and tool_name != tool_filter:
             continue
+        t_collect = time.monotonic()
         try:
             exchanges, counts = collect_fn(cutoff, tool_filter, cutoff_end)
         except Exception:
-            continue
+            exchanges, counts = [], {}
+        tstamp_scan(f"{tool_name} (exchanges)", t_collect, len(exchanges))
         all_exchanges.extend(exchanges)
         for k, v in counts.items():
             tool_counts[k] = tool_counts.get(k, 0) + v
@@ -169,8 +178,8 @@ def _render_overview(period_name: str | None, tool_filter: str | None,
     aggregated metrics — pass it back as `prev_state` next call to highlight
     rows that changed.
     """
-    print(f"\n{BOLD} Token Usage — All tools{RESET}{header_suffix}")
-    print(f"{DIM}  Scanning all data sources...{RESET}\n")
+    print(f"\n{tstamp()}{BOLD} Token Usage — All tools{RESET}{header_suffix}")
+    print(f"{tstamp()}{DIM}  Scanning all data sources...{RESET}\n")
 
     try:
         cutoff, cutoff_end, period_label = resolve_period(period_name)
@@ -195,7 +204,7 @@ def _render_overview(period_name: str | None, tool_filter: str | None,
         span = f"{DIM}{_span_label(tool_ts):>10}{RESET}"
         since = (f"{DIM}since {min(tool_ts).strftime('%Y-%m-%d')}{RESET}"
                  if tool_ts else f"{DIM}{'—':>16}{RESET}")
-        print(f"  {color}●{RESET} {tool_name:<12} {n_in_period:>6} records · "
+        print(f"{tstamp()}  {color}●{RESET} {tool_name:<12} {n_in_period:>6} records · "
               f"{span} · {since} from {data_path}")
 
     print()
@@ -220,10 +229,10 @@ def _render_overview(period_name: str | None, tool_filter: str | None,
 
 def main(period_name: str | None = None, tool_filter: str | None = None,
          by_session: bool = False):
-    print(f"{DIM}  Loading pricing from LiteLLM...{RESET}")
+    print(f"{tstamp()}{DIM}  Loading pricing from LiteLLM...{RESET}")
     load_pricing()
     if PRICING:
-        print(f"  {DIM}{len(PRICING)} models loaded{RESET}")
+        print(f"{tstamp()}  {DIM}{len(PRICING)} models loaded{RESET}")
     _render_overview(period_name, tool_filter, by_session=by_session)
 
 
@@ -235,7 +244,7 @@ def watch(period_name: str | None, tool_filter: str | None, interval: float,
     redraw overwrites in place without flashing. Rows whose aggregated
     metrics changed since the previous tick are marked with a yellow ◆.
     """
-    print(f"{DIM}  Loading pricing from LiteLLM...{RESET}")
+    print(f"{tstamp()}{DIM}  Loading pricing from LiteLLM...{RESET}")
     load_pricing()
     sys.stdout.write("\033[?25l")  # hide cursor during loop
     sys.stdout.flush()

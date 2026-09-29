@@ -6,6 +6,7 @@ CLI toolkit to aggregate and analyze AI coding assistant token consumption. Each
 
 ## Changelog
 
+- **1.20.0** — **Startup diagnostics**: set `TOKSTAT_TIMING=1` to prefix each progress line (`Loading pricing…`, every per-tool scan / speed / exchange step) with the elapsed time since launch (`[+  1.23s]`), and to log whether pricing came from the local cache or a network fetch — handy to pinpoint which source or step dominates a slow run. Off by default; output is unchanged without it.
 - **1.19.1** — Fix (Kiro): recent Kiro versions stopped writing the JSON `workspace-sessions/` store and now keep only session references (id + title) in each workspace's `state.vscdb` (`kiro.kiroAgent → sessionPanels.entries`), so tokstat showed no Kiro activity after ~mid-2026. tokstat now also reads those `state.vscdb` entries and surfaces recent sessions as **activity-only** (title + project + date) — still no tokens, as Kiro exposes none usable.
 - **1.19.0** — Added **Antigravity** *(experimental)* (`antigravity-token-usage` / `agy-token-usage`): scans `~/.gemini/antigravity-cli/` SQLite databases + transcript logs for **exact** prompt/output/cached token metrics, tool-call timeline, models, speed and duration. The token metrics live in protobuf blobs with no public schema, so the reader is reverse-engineered and **fails loudly** if the format drifts (it warns when steps stop parsing, and flags models with no LiteLLM price rather than silently costing $0). Adds `--period 24h` / `1 day`. Thanks **@louisvolant** ([#3](https://github.com/thiga-co/tokstat/pull/3)).
 - **1.18.2** — Fix (opencode): read opencode's new **SQLite storage** (`opencode.db`). Recent opencode versions replaced the JSON `storage/message/…` layout, so tokstat found no data on up-to-date installs. The reader now auto-detects the backend (current `session_message` schema → intermediate `message`+`part` → legacy JSON), opens the DB read-only, and also surfaces opencode tool calls in `--tool-use`. Thanks **@louisvolant** ([#2](https://github.com/thiga-co/tokstat/pull/2)).
@@ -465,6 +466,30 @@ available history.
 ## Pricing
 
 Model pricing is fetched from [LiteLLM's model pricing database](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) and cached at `~/.cache/token-usage/litellm_prices.json` for 24 hours. Falls back to stale cache if fetch fails.
+
+## Diagnostics
+
+Set `TOKSTAT_TIMING=1` to add an elapsed-time marker to each progress line, so you can see where a slow run spends its time:
+
+```sh
+TOKSTAT_TIMING=1 tokstat
+```
+
+```text
+[+   0.01s]   Loading pricing from LiteLLM...
+    · pricing: cache in 0.01s
+[+   0.03s]   3698 models loaded
+[+   0.03s]  Token Usage — All tools
+[+   0.03s]    Scanning all data sources...
+    · Claude Code: 163 record(s) in 0.02s
+    · Antigravity: 18262 record(s) in 2.16s
+    · Antigravity (speed): 7542 record(s) in 0.01s
+    · Antigravity (exchanges): 493 record(s) in 0.67s
+    · opencode: 12295 record(s) in 1.91s
+[+   5.80s]   ● Antigravity    651 records · ...
+```
+
+Off by default — without the variable, output is unchanged. The `pricing:` line reports whether pricing came from the local cache or a network fetch (a slow first line usually means a cold network fetch).
 
 ## Credits
 
