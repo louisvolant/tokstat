@@ -228,6 +228,84 @@ def _extract_gen_models(cur: sqlite3.Cursor) -> tuple[dict[int, str], dict[int, 
     return step_model, enum_model
 
 
+# ─── Per-DB parse cache ───────────────────────────────────────────────────────
+# scan / scan_speed / exchange extraction each walk the same 100+ conversation
+# DBs, so without this the gen_metadata table and every protobuf blob get
+# decoded three times per run. Parse once, keyed by path and invalidated on
+# mtime change (so --watch still picks up new steps). Rows are stored as
+# compact tuples rather than raw field lists to keep memory bounded.
+_DB_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def _load_db_steps(db_path: Path, meta_project: str) -> dict | None:
+    """Parse one conversation DB once.
+
+    Returns {"project", "step_model", "enum_model", "steps"} where ``steps`` is
+    a list of (idx, step_type, t_sec, input, output, cache_read, model_enum,
+    has_tokens) ordered by idx — or None if the DB cannot be read."""
+    try:
+        mtime = db_path.stat().st_mtime
+    except OSError:
+        return None
+    cached = _DB_CACHE.get(str(db_path))
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        cur = con.cursor()
+        project = meta_project or "unknown"
+        if project == "unknown":
+            project = _extract_fallback_project(con)
+        step_model, enum_model = _extract_gen_models(cur)
+
+        cur.execute("SELECT idx, step_type, metadata FROM steps "
+                    "WHERE metadata IS NOT NULL ORDER BY idx")
+        steps = []
+        for idx, stype, meta in cur.fetchall():
+            t_sec = None
+            inp = out = cache_tok = 0
+            menum = None
+            has_tokens = False
+            for fn, wt, val in _parse_proto(meta):
+                if fn == 1 and wt == 2:
+                    t_sec = _get_time_from_proto(val)
+                elif fn == 9 and wt == 2 and val:
+                    has_tokens = True
+                    tok = {f: v for f, w, v in _parse_proto(val) if w == 0}
+                    inp = tok.get(2, 0)
+                    out = tok.get(3, 0)
+                    cache_tok = tok.get(5, 0)
+                    menum = tok.get(1)
+            steps.append((idx, stype, t_sec, inp, out, cache_tok,
+                          menum, has_tokens))
+    except (sqlite3.Error, OSError):
+        return None
+    finally:
+        con.close()
+
+    entry = {"project": project, "step_model": step_model,
+             "enum_model": enum_model, "steps": steps}
+    _DB_CACHE[str(db_path)] = (mtime, entry)
+    return entry
+
+
+def _last_write(path: Path) -> float:
+    """Latest mtime of a SQLite file and its ``-wal`` sidecar, as an epoch
+    float. In WAL mode the main ``.db`` mtime often lags; the ``-wal`` file is
+    what moves on each commit, so the max is the reliable "last touched"."""
+    latest = 0.0
+    for p in (path, Path(str(path) + "-wal")):
+        try:
+            latest = max(latest, p.stat().st_mtime)
+        except OSError:
+            pass
+    return latest
+
+
 # ─── Scanners ────────────────────────────────────────────────────────────────
 
 def _report_scan_health(total15: int, unparsed15: int, unpriced: set) -> None:
@@ -246,11 +324,17 @@ def _report_scan_health(total15: int, unparsed15: int, unpriced: set) -> None:
               f"model(s) — cost shown as $0: {shown}{more}.{RESET}", file=sys.stderr)
 
 
-def scan_antigravity() -> list[dict]:
-    """Scan Antigravity conversation SQLite databases for token usage."""
+def scan_antigravity(cutoff: datetime | None = None,
+                     cutoff_end: datetime | None = None) -> list[dict]:
+    """Scan Antigravity conversation SQLite databases for token usage.
+
+    When ``cutoff`` is given, whole DBs last written before it are skipped —
+    they cannot hold any in-period step, so for a short period this avoids
+    parsing most of the history."""
     if not _CONV_DIR.exists():
         return []
 
+    cutoff_ts = cutoff.timestamp() if cutoff is not None else None
     summaries = _load_summaries_meta()
     records = []
     total15 = 0                 # step_type=15 rows carrying metadata
@@ -258,173 +342,120 @@ def scan_antigravity() -> list[dict]:
     unpriced: set[str] = set()  # models with output tokens but no LiteLLM price
 
     for db_path in sorted(_CONV_DIR.glob("*.db")):
-        cid = db_path.stem
-        meta_info = summaries.get(cid, {})
-        project = meta_info.get("project", "unknown")
-
-        try:
-            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            cur = con.cursor()
-
-            if project == "unknown":
-                project = _extract_fallback_project(con)
-
-            step_model, enum_model = _extract_gen_models(cur)
-
-            cur.execute("SELECT idx, metadata FROM steps WHERE step_type = 15 AND metadata IS NOT NULL")
-            for idx, meta in cur.fetchall():
-                total15 += 1
-                p = _parse_proto(meta)
-                f9 = None
-                t_sec = None
-                for fn, wt, val in p:
-                    if fn == 9 and wt == 2:
-                        f9 = val
-                    elif fn == 1 and wt == 2:
-                        t_sec = _get_time_from_proto(val)
-
-                if not f9:
-                    unparsed15 += 1     # token container gone → likely drift
-                    continue
-                if t_sec is None:
-                    continue
-
-                tok_map = {fn: val for fn, wt, val in _parse_proto(f9) if wt == 0}
-                inp = tok_map.get(2, 0)
-                out = tok_map.get(3, 0)
-                cached = tok_map.get(5, 0)
-                menum = tok_map.get(1)
-
-                if inp == 0 and out == 0:
-                    continue
-
-                raw_model = step_model.get(idx) or enum_model.get(menum) or "gemini-unknown"
-                model = _normalize_model_name(raw_model)
-                ts = datetime.fromtimestamp(t_sec, tz=timezone.utc)
-                tokens = {
-                    "input":       inp,
-                    "output":      out,
-                    "cache_read":  cached,
-                    "cache_write": 0,
-                }
-                cost = compute_cost(tokens, model)
-                if cost == 0 and out > 0:
-                    unpriced.add(model)
-                records.append({
-                    "tool":    TOOL_NAME,
-                    "model":   model,
-                    "project": project,
-                    "ts":      ts,
-                    **tokens,
-                    "cost":    cost,
-                })
-
-            con.close()
-        except (sqlite3.Error, OSError):
+        if cutoff_ts is not None and _last_write(db_path) < cutoff_ts:
             continue
+        meta_info = summaries.get(db_path.stem, {})
+        entry = _load_db_steps(db_path, meta_info.get("project", "unknown"))
+        if entry is None:
+            continue
+        project = entry["project"]
+        step_model = entry["step_model"]
+        enum_model = entry["enum_model"]
+
+        for idx, stype, t_sec, inp, out, cache_tok, menum, has_tokens in entry["steps"]:
+            if stype != 15:
+                continue
+            total15 += 1
+            if not has_tokens:
+                unparsed15 += 1     # token container gone → likely drift
+                continue
+            if t_sec is None:
+                continue
+
+            if inp == 0 and out == 0:
+                continue
+
+            raw_model = step_model.get(idx) or enum_model.get(menum) or "gemini-unknown"
+            model = _normalize_model_name(raw_model)
+            ts = datetime.fromtimestamp(t_sec, tz=timezone.utc)
+            tokens = {
+                "input":       inp,
+                "output":      out,
+                "cache_read":  cache_tok,
+                "cache_write": 0,
+            }
+            cost = compute_cost(tokens, model)
+            if cost == 0 and out > 0:
+                unpriced.add(model)
+            records.append({
+                "tool":    TOOL_NAME,
+                "model":   model,
+                "project": project,
+                "ts":      ts,
+                **tokens,
+                "cost":    cost,
+            })
 
     _report_scan_health(total15, unparsed15, unpriced)
     return records
 
 
-def scan_speed_antigravity() -> list[dict]:
+def scan_speed_antigravity(cutoff: datetime | None = None,
+                           cutoff_end: datetime | None = None) -> list[dict]:
     """Extract generation speed (tokens/sec) from Antigravity steps."""
     if not _CONV_DIR.exists():
         return []
 
+    cutoff_ts = cutoff.timestamp() if cutoff is not None else None
+    summaries = _load_summaries_meta()
     results = []
 
     for db_path in sorted(_CONV_DIR.glob("*.db")):
-        try:
-            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            cur = con.cursor()
-
-            step_model, enum_model = _extract_gen_models(cur)
-
-            cur.execute("SELECT idx, step_type, metadata FROM steps WHERE metadata IS NOT NULL ORDER BY idx")
-            prev_ts = None
-
-            for idx, stype, meta in cur.fetchall():
-                p = _parse_proto(meta)
-                m = {fn: val for fn, wt, val in p}
-                t = _get_time_from_proto(m[1]) if 1 in m else None
-                if not t:
-                    continue
-
-                if stype == 15 and 9 in m and prev_ts is not None:
-                    p9 = _parse_proto(m[9])
-                    tok_map = {fn: val for fn, wt, val in p9 if wt == 0}
-                    out = tok_map.get(3, 0)
-                    menum = tok_map.get(1)
-                    model = step_model.get(idx) or enum_model.get(menum) or "gemini-unknown"
-
-                    dt = t - prev_ts
-                    if 0.5 < dt < 300 and out >= 10:
-                        ts = datetime.fromtimestamp(t, tz=timezone.utc)
-                        results.append({
-                            "tool":     TOOL_NAME,
-                            "model":    model,
-                            "ts":       ts,
-                            "tokens":   out,
-                            "duration": dt,
-                            "speed":    out / dt,
-                            "ttft":     None,
-                        })
-
-                prev_ts = t
-
-            con.close()
-        except (sqlite3.Error, OSError):
+        if cutoff_ts is not None and _last_write(db_path) < cutoff_ts:
             continue
+        meta_info = summaries.get(db_path.stem, {})
+        entry = _load_db_steps(db_path, meta_info.get("project", "unknown"))
+        if entry is None:
+            continue
+        step_model = entry["step_model"]
+        enum_model = entry["enum_model"]
+
+        prev_ts = None
+        for idx, stype, t_sec, inp, out, cache_tok, menum, has_tokens in entry["steps"]:
+            t = t_sec
+            if not t:
+                continue
+
+            if stype == 15 and has_tokens and prev_ts is not None:
+                model = step_model.get(idx) or enum_model.get(menum) or "gemini-unknown"
+
+                dt = t - prev_ts
+                if 0.5 < dt < 300 and out >= 10:
+                    ts = datetime.fromtimestamp(t, tz=timezone.utc)
+                    results.append({
+                        "tool":     TOOL_NAME,
+                        "model":    model,
+                        "ts":       ts,
+                        "tokens":   out,
+                        "duration": dt,
+                        "speed":    out / dt,
+                        "ttft":     None,
+                    })
+
+            prev_ts = t
 
     return results
 
 
 # ─── Exchanges ────────────────────────────────────────────────────────────────
 
-def _extract_exchanges_antigravity() -> list[dict]:
-    """Extract conversation exchanges, tool calls, and per-turn token usage."""
+def _extract_exchanges_antigravity(cutoff: datetime | None = None,
+                                   cutoff_end: datetime | None = None) -> list[dict]:
+    """Extract conversation exchanges, tool calls, and per-turn token usage.
+
+    DBs (and their transcripts) last written before ``cutoff`` are skipped:
+    an exchange is anchored on its user prompt, which cannot be in-period if
+    neither file has been touched since."""
     if not _CONV_DIR.exists():
         return []
 
+    cutoff_ts = cutoff.timestamp() if cutoff is not None else None
     summaries = _load_summaries_meta()
     exchanges: list[dict] = []
 
     for db_path in sorted(_CONV_DIR.glob("*.db")):
         cid = db_path.stem
-        meta_info = summaries.get(cid, {})
-        project = meta_info.get("project", "unknown")
-
-        try:
-            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            cur = con.cursor()
-
-            if project == "unknown":
-                project = _extract_fallback_project(con)
-
-            step_model, enum_model = _extract_gen_models(cur)
-
-            # Map step_idx -> token breakdown
-            step_tokens: dict[int, dict] = {}
-            cur.execute("SELECT idx, metadata FROM steps WHERE step_type = 15 AND metadata IS NOT NULL")
-            for idx, meta in cur.fetchall():
-                p = _parse_proto(meta)
-                m = {fn: val for fn, wt, val in p}
-                if 9 not in m:
-                    continue
-                tok_map = {fn: val for fn, wt, val in _parse_proto(m[9]) if wt == 0}
-                inp = tok_map.get(2, 0)
-                out = tok_map.get(3, 0)
-                cached = tok_map.get(5, 0)
-                menum = tok_map.get(1)
-                model = step_model.get(idx) or enum_model.get(menum) or "gemini-unknown"
-                step_tokens[idx] = {
-                    "input": inp, "output": out, "cache_read": cached, "cache_write": 0,
-                    "model": model,
-                }
-
-            con.close()
-        except (sqlite3.Error, OSError):
+        if cutoff_ts is not None and _last_write(db_path) < cutoff_ts:
             continue
 
         transcript_path = _BRAIN_DIR / cid / ".system_generated" / "logs" / "transcript.jsonl"
@@ -433,6 +464,32 @@ def _extract_exchanges_antigravity() -> list[dict]:
 
         if not transcript_path.exists():
             continue
+
+        if cutoff_ts is not None:
+            try:
+                if transcript_path.stat().st_mtime < cutoff_ts:
+                    continue
+            except OSError:
+                continue
+
+        meta_info = summaries.get(cid, {})
+        entry = _load_db_steps(db_path, meta_info.get("project", "unknown"))
+        if entry is None:
+            continue
+        project = entry["project"]
+        step_model = entry["step_model"]
+        enum_model = entry["enum_model"]
+
+        # Map step_idx -> token breakdown (from the shared per-DB parse)
+        step_tokens: dict[int, dict] = {}
+        for idx, stype, t_sec, inp, out, cache_tok, menum, has_tokens in entry["steps"]:
+            if stype != 15 or not has_tokens:
+                continue
+            model = step_model.get(idx) or enum_model.get(menum) or "gemini-unknown"
+            step_tokens[idx] = {
+                "input": inp, "output": out, "cache_read": cache_tok, "cache_write": 0,
+                "model": model,
+            }
 
         current = None
         try:
@@ -570,7 +627,7 @@ def _collect_all_exchanges(cutoff: datetime, tool_filter: str | None = None,
             all_exchanges.extend(filtered)
             tool_counts[tname] = tool_counts.get(tname, 0) + len(filtered)
 
-    _add(TOOL_NAME, _extract_exchanges_antigravity())
+    _add(TOOL_NAME, _extract_exchanges_antigravity(cutoff, cutoff_end))
     _warm_worktree_cache(set(e.get("project") or "unknown" for e in all_exchanges))
     return all_exchanges, tool_counts
 
@@ -605,7 +662,7 @@ def main(period_name: str | None = None, tool_filter: str | None = None,
         print(f"  {DIM}Antigravity not found at {_BASE}{RESET}\n")
         return
 
-    records = scan_antigravity()
+    records = scan_antigravity(cutoff=cutoff, cutoff_end=cutoff_end)
     records = [r for r in records
                if r["ts"] >= cutoff and (cutoff_end is None or r["ts"] < cutoff_end)]
 
@@ -619,7 +676,7 @@ def main(period_name: str | None = None, tool_filter: str | None = None,
         print(f"\n  {YELLOW}No token usage data found.{RESET}\n")
         return
 
-    speed_records = scan_speed_antigravity()
+    speed_records = scan_speed_antigravity(cutoff=cutoff, cutoff_end=cutoff_end)
     speed_records = [sr for sr in speed_records
                      if sr["ts"] >= cutoff and (cutoff_end is None or sr["ts"] < cutoff_end)]
 

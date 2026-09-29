@@ -9,6 +9,7 @@ Copyright (c) 2026 Olivier Bergeret
 
 from __future__ import annotations
 
+import inspect
 import io
 import sys
 import time
@@ -40,6 +41,7 @@ from tokstat.gemini_cli import (
 from tokstat.opencode_cli import (
     scan_opencode, scan_speed_opencode,
     _collect_all_exchanges as _collect_opencode,
+    _DB as _OPENCODE_DB, _MSG_BASE as _OPENCODE_MSG_BASE,
 )
 from tokstat.claude_web_cli import (
     scan_claude_web,
@@ -52,6 +54,7 @@ from tokstat.chatgpt_web_cli import (
 from tokstat.antigravity_cli import (
     scan_antigravity, scan_speed_antigravity,
     _collect_all_exchanges as _collect_antigravity,
+    _CONV_DIR as _AG_CONV_DIR,
 )
 
 from tokstat._core import (
@@ -69,23 +72,46 @@ from tokstat._core import (
 )
 
 
-# Map each known tool name → (scanner, speed_scanner_or_None, collector, data_label)
+# Map each known tool name → (scanner, speed_scanner_or_None, collector, data_label, presence_probe)
+# `presence_probe` cheaply reports whether the tool has any data on disk, so a
+# tool with nothing in the selected period still appears (as "0 records").
 _TOOLS = [
-    ("Claude Code",  scan_claude_code,   scan_speed_claude_code, _collect_claude,      "~/.claude/"),
-    ("Codex",        scan_codex,         scan_speed_codex,       _collect_codex,       "~/.codex/"),
+    ("Claude Code",  scan_claude_code,   scan_speed_claude_code, _collect_claude,      "~/.claude/", None),
+    ("Codex",        scan_codex,         scan_speed_codex,       _collect_codex,       "~/.codex/", None),
     ("Cursor",       scan_cursor,        None,                   _collect_cursor,
-     "~/Library/.../Cursor/"),
+     "~/Library/.../Cursor/", None),
     ("Kiro",         scan_kiro,          None,                   _collect_kiro,
-     "~/Library/Application Support/Kiro/"),
-    ("Gemini CLI",   scan_gemini,        scan_speed_gemini,      _collect_gemini,      "~/.gemini/"),
-    ("Antigravity",  scan_antigravity,   scan_speed_antigravity, _collect_antigravity, "~/.gemini/antigravity-cli/"),
+     "~/Library/Application Support/Kiro/", None),
+    ("Gemini CLI",   scan_gemini,        scan_speed_gemini,      _collect_gemini,      "~/.gemini/", None),
+    ("Antigravity",  scan_antigravity,   scan_speed_antigravity, _collect_antigravity, "~/.gemini/antigravity-cli/",
+     lambda: _path_exists(_AG_CONV_DIR)),
     ("opencode",     scan_opencode,      scan_speed_opencode,    _collect_opencode,
-     "~/.local/share/opencode/"),
+     "~/.local/share/opencode/",
+     lambda: _path_exists(_OPENCODE_DB) or _path_exists(_OPENCODE_MSG_BASE)),
     ("Claude.ai",    scan_claude_web,    None,                   _collect_claude_web,
-     "claude.ai (web)"),
+     "claude.ai (web)", None),
     ("ChatGPT",      scan_chatgpt_web,   None,                   _collect_chatgpt_web,
-     "chatgpt.com (web)"),
+     "chatgpt.com (web)", None),
 ]
+
+
+def _path_exists(path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _supports_cutoff(fn) -> bool:
+    """True when a scanner accepts cutoff=... (period-aware scans skip whole
+    sources that cannot hold in-period data)."""
+    if fn is None:
+        return False
+    try:
+        return "cutoff" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
 
 _TOOL_ALIASES = {
     "claude": "Claude Code", "claude-code": "Claude Code", "claudecode": "Claude Code",
@@ -100,28 +126,38 @@ _TOOL_ALIASES = {
 }
 
 
-def _scan_all(tool_filter: str | None) -> tuple[list[dict], list[dict], list[tuple[str, int, str]]]:
+def _scan_all(tool_filter: str | None, cutoff: datetime | None = None,
+              cutoff_end: datetime | None = None) -> tuple[list[dict], list[dict], list[tuple[str, int, str]]]:
     """Run every registered scanner. Returns (records, speed_records, per_tool_counts)."""
     records: list[dict] = []
     speed_records: list[dict] = []
     counts: list[tuple[str, int, str]] = []  # (tool, n_records, data_path)
 
-    for tool_name, scan_fn, speed_fn, _collect, data_path in _TOOLS:
+    for tool_name, scan_fn, speed_fn, _collect, data_path, presence in _TOOLS:
         if tool_filter and tool_name != tool_filter:
             continue
         t_scan = time.monotonic()
         try:
-            tool_records = scan_fn()
+            if _supports_cutoff(scan_fn):
+                tool_records = scan_fn(cutoff=cutoff, cutoff_end=cutoff_end)
+            else:
+                tool_records = scan_fn()
         except Exception:
             tool_records = []
         records.extend(tool_records)
-        counts.append((tool_name, len(tool_records), data_path))
+        n_total = len(tool_records)
+        if n_total == 0 and presence is not None and presence():
+            n_total = 1     # has data on disk, just none in the selected period
+        counts.append((tool_name, n_total, data_path))
         tstamp_scan(tool_name, t_scan, len(tool_records))
 
         if speed_fn is not None:
             t_speed = time.monotonic()
             try:
-                speed = speed_fn()
+                if _supports_cutoff(speed_fn):
+                    speed = speed_fn(cutoff=cutoff, cutoff_end=cutoff_end)
+                else:
+                    speed = speed_fn()
                 speed_records.extend(speed)
             except Exception:
                 speed = []
@@ -136,7 +172,7 @@ def _collect_all_exchanges(cutoff: datetime, tool_filter: str | None = None,
     all_exchanges: list[dict] = []
     tool_counts: dict[str, int] = {}
 
-    for tool_name, _scan, _speed, collect_fn, _path in _TOOLS:
+    for tool_name, _scan, _speed, collect_fn, _path, _presence in _TOOLS:
         if tool_filter and tool_name != tool_filter:
             continue
         t_collect = time.monotonic()
@@ -187,7 +223,7 @@ def _render_overview(period_name: str | None, tool_filter: str | None,
         print(f"  {RED}{e}{RESET}\n")
         return False, None
 
-    records, speed_records, counts = _scan_all(tool_filter)
+    records, speed_records, counts = _scan_all(tool_filter, cutoff, cutoff_end)
 
     records = [r for r in records
                if r["ts"] >= cutoff and (cutoff_end is None or r["ts"] < cutoff_end)]
