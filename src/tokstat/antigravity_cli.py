@@ -13,6 +13,7 @@ Copyright (c) 2026 Olivier Bergeret
 
 from __future__ import annotations
 
+import atexit
 import json
 import re
 import sqlite3
@@ -229,28 +230,137 @@ def _extract_gen_models(cur: sqlite3.Cursor) -> tuple[dict[int, str], dict[int, 
 
 
 # ─── Per-DB parse cache ───────────────────────────────────────────────────────
-# scan / scan_speed / exchange extraction each walk the same 100+ conversation
-# DBs, so without this the gen_metadata table and every protobuf blob get
-# decoded three times per run. Parse once, keyed by path and invalidated on
-# mtime change (so --watch still picks up new steps). Rows are stored as
-# compact tuples rather than raw field lists to keep memory bounded.
-_DB_CACHE: dict[str, tuple[float, dict]] = {}
+# scan / scan_speed / exchange extraction each walk the same conversation DBs,
+# so without caching the gen_metadata table and every protobuf blob would get
+# decoded three times per run. Parse once, keyed by path and invalidated on any
+# change to the DB (mtime + size, `-wal` included), and share the result across
+# passes. Rows are stored as compact lists of numbers, never raw text, so the
+# cache carries no conversation content. An on-disk index (below) additionally
+# reuses the parsed result across runs.
+_DB_CACHE: dict[str, tuple[list, dict]] = {}
+
+# Persistent index under the same ~/.cache/token-usage/ dir as the LiteLLM and
+# EcoLogits caches — regenerable, safe to delete. Only ever written when
+# Antigravity conversation DBs are actually parsed; users without Antigravity
+# get no file. Numeric aggregates only: per-step token counts, model names and
+# the project path (all already shown in the output) — no prompts/transcripts.
+_INDEX_PATH = Path.home() / ".cache" / "token-usage" / "antigravity_index.json"
+_INDEX_VERSION = 1                 # bump whenever the parse format changes
+_INDEX_MAX_BYTES = 64 * 1024 * 1024  # prune oldest DBs above this size
+
+_DISK_INDEX: dict | None = None
+_DISK_INDEX_DIRTY = False
+_ATEXIT_REGISTERED = False
 
 
-def _load_db_steps(db_path: Path, meta_project: str) -> dict | None:
-    """Parse one conversation DB once.
+def _db_signature(db_path: Path) -> list:
+    """Cheap change fingerprint for a SQLite DB: (mtime, size) of the file and
+    its ``-wal`` sidecar. Any commit or checkpoint moves one of them, so a
+    signature match means the parsed result is still valid."""
+    sig: list = []
+    for suffix in ("", "-wal"):
+        try:
+            st = Path(str(db_path) + suffix).stat()
+            sig.extend((st.st_mtime, st.st_size))
+        except OSError:
+            sig.extend((0.0, 0))
+    return sig
 
-    Returns {"project", "step_model", "enum_model", "steps"} where ``steps`` is
-    a list of (idx, step_type, t_sec, input, output, cache_read, model_enum,
-    has_tokens) ordered by idx — or None if the DB cannot be read."""
+
+def _load_disk_index() -> dict:
+    """Load the on-disk index once per process (empty on any problem)."""
+    global _DISK_INDEX
+    if _DISK_INDEX is not None:
+        return _DISK_INDEX
+    _DISK_INDEX = {}
     try:
-        mtime = db_path.stat().st_mtime
-    except OSError:
-        return None
-    cached = _DB_CACHE.get(str(db_path))
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
+        raw = json.loads(_INDEX_PATH.read_text())
+        if isinstance(raw, dict) and raw.get("version") == _INDEX_VERSION:
+            entries = raw.get("entries")
+            if isinstance(entries, dict):
+                _DISK_INDEX = entries
+    except (OSError, json.JSONDecodeError):
+        _DISK_INDEX = {}
+    return _DISK_INDEX
 
+
+def _disk_index_lookup(db_key: str, sig: list, meta_project: str) -> dict | None:
+    e = _load_disk_index().get(db_key)
+    if not isinstance(e, dict) or e.get("sig") != sig \
+            or e.get("meta_project") != meta_project:
+        return None
+    try:
+        steps = e.get("steps")
+        if not isinstance(steps, list):
+            return None
+        return {
+            "project": e["project"],
+            "step_model": {int(k): v for k, v in (e.get("step_model") or {}).items()},
+            "enum_model": {int(k): v for k, v in (e.get("enum_model") or {}).items()},
+            "steps": steps,
+        }
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _disk_index_store(db_key: str, entry: dict) -> None:
+    global _DISK_INDEX_DIRTY, _ATEXIT_REGISTERED
+    _load_disk_index()[db_key] = {
+        "sig": entry["sig"],
+        "meta_project": entry["meta_project"],
+        "project": entry["project"],
+        "step_model": {str(k): v for k, v in entry["step_model"].items()},
+        "enum_model": {str(k): v for k, v in entry["enum_model"].items()},
+        "steps": entry["steps"],
+    }
+    _DISK_INDEX_DIRTY = True
+    if not _ATEXIT_REGISTERED:
+        atexit.register(_save_disk_index)
+        _ATEXIT_REGISTERED = True
+
+
+def _prune_index(idx: dict) -> dict:
+    """Keep the most recently written DBs while the JSON stays under the cap."""
+    def last_write(e: dict) -> float:
+        sig = e.get("sig") or []
+        return max(sig[0] if len(sig) > 0 else 0.0,
+                   sig[2] if len(sig) > 2 else 0.0)
+
+    ordered = sorted(idx.items(), key=lambda kv: last_write(kv[1]), reverse=True)
+    keep = dict(ordered)
+    while len(keep) > 1:
+        data = json.dumps({"version": _INDEX_VERSION, "entries": keep})
+        if len(data.encode()) <= _INDEX_MAX_BYTES:
+            break
+        keep = dict(list(keep.items())[:max(1, len(keep) // 2)])
+    return keep
+
+
+def _save_disk_index() -> None:
+    """Flush the index at exit, dropping entries for deleted DBs and pruning if
+    oversized. Best-effort: any I/O error just skips the write."""
+    global _DISK_INDEX_DIRTY
+    if not _DISK_INDEX_DIRTY or _DISK_INDEX is None:
+        return
+    live = {k: e for k, e in _DISK_INDEX.items() if Path(k).exists()}
+    data = json.dumps({"version": _INDEX_VERSION, "entries": live})
+    if len(data.encode()) > _INDEX_MAX_BYTES:
+        live = _prune_index(live)
+        data = json.dumps({"version": _INDEX_VERSION, "entries": live})
+        if len(data.encode()) > _INDEX_MAX_BYTES:
+            return
+    try:
+        _INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = Path(str(_INDEX_PATH) + ".tmp")
+        tmp.write_text(data)
+        tmp.replace(_INDEX_PATH)   # atomic swap: readers never see a half file
+        _DISK_INDEX_DIRTY = False
+    except OSError:
+        pass
+
+
+def _parse_db_entry(db_path: Path, meta_project: str) -> dict | None:
+    """Decode one conversation DB (gen_metadata + every step's protobuf)."""
     try:
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     except sqlite3.Error:
@@ -280,16 +390,44 @@ def _load_db_steps(db_path: Path, meta_project: str) -> dict | None:
                     out = tok.get(3, 0)
                     cache_tok = tok.get(5, 0)
                     menum = tok.get(1)
-            steps.append((idx, stype, t_sec, inp, out, cache_tok,
-                          menum, has_tokens))
+            steps.append([idx, stype, t_sec, inp, out, cache_tok,
+                          menum, has_tokens])
     except (sqlite3.Error, OSError):
         return None
     finally:
         con.close()
 
-    entry = {"project": project, "step_model": step_model,
-             "enum_model": enum_model, "steps": steps}
-    _DB_CACHE[str(db_path)] = (mtime, entry)
+    return {"project": project, "step_model": step_model,
+            "enum_model": enum_model, "steps": steps}
+
+
+def _load_db_steps(db_path: Path, meta_project: str) -> dict | None:
+    """Parsed steps for one conversation DB: memory cache → disk index → parse.
+
+    Returns {"project", "step_model", "enum_model", "steps"} where ``steps`` is
+    a list of [idx, step_type, t_sec, input, output, cache_read, model_enum,
+    has_tokens] ordered by idx — or None if the DB cannot be read."""
+    sig = _db_signature(db_path)
+    db_key = str(db_path)
+
+    cached = _DB_CACHE.get(db_key)
+    if cached is not None and cached[0] == sig \
+            and cached[1].get("meta_project") == meta_project:
+        return cached[1]
+
+    entry = _disk_index_lookup(db_key, sig, meta_project)
+    if entry is None:
+        entry = _parse_db_entry(db_path, meta_project)
+        if entry is None:
+            return None
+        entry["sig"] = sig
+        entry["meta_project"] = meta_project
+        _disk_index_store(db_key, entry)
+    else:
+        entry["sig"] = sig
+        entry["meta_project"] = meta_project
+
+    _DB_CACHE[db_key] = (sig, entry)
     return entry
 
 

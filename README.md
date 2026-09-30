@@ -6,7 +6,7 @@ CLI toolkit to aggregate and analyze AI coding assistant token consumption. Each
 
 ## Changelog
 
-- **1.20.0** — **Startup diagnostics**: set `TOKSTAT_TIMING=1` to prefix each progress line (`Loading pricing…`, every per-tool scan / speed / exchange step) with the elapsed time since launch (`[+  1.23s]`), and to log whether pricing came from the local cache or a network fetch — handy to pinpoint which source or step dominates a slow run. Off by default; output is unchanged without it. Also **speeds up period-filtered runs**: Antigravity now parses each SQLite conversation DB once (shared by the scan / speed / exchange passes) instead of three times, and Antigravity + opencode skip data that cannot fall inside the requested `--period` (e.g. `today`), which cuts a typical startup from several seconds to ~1–2 s.
+- **1.20.0** — **Startup diagnostics**: set `TOKSTAT_TIMING=1` to prefix each progress line (`Loading pricing…`, every per-tool scan / speed / exchange step) with the elapsed time since launch (`[+  1.23s]`), and to log whether pricing came from the local cache or a network fetch — handy to pinpoint which source or step dominates a slow run. Off by default; output is unchanged without it. Also **speeds up runs**: Antigravity now parses each SQLite conversation DB once (shared by the scan / speed / exchange passes) instead of three times, and Antigravity + opencode skip data that cannot fall inside the requested `--period` (e.g. `today`). Antigravity additionally keeps a small **persistent index** (`~/.cache/token-usage/antigravity_index.json`, invalidated by DB mtime + size, numeric aggregates only, written only when Antigravity data exists) so unchanged databases are not re-decoded on the next run — `tokstat --period today` drops from several seconds to well under a second on a warm index.
 - **1.19.1** — Fix (Kiro): recent Kiro versions stopped writing the JSON `workspace-sessions/` store and now keep only session references (id + title) in each workspace's `state.vscdb` (`kiro.kiroAgent → sessionPanels.entries`), so tokstat showed no Kiro activity after ~mid-2026. tokstat now also reads those `state.vscdb` entries and surfaces recent sessions as **activity-only** (title + project + date) — still no tokens, as Kiro exposes none usable.
 - **1.19.0** — Added **Antigravity** *(experimental)* (`antigravity-token-usage` / `agy-token-usage`): scans `~/.gemini/antigravity-cli/` SQLite databases + transcript logs for **exact** prompt/output/cached token metrics, tool-call timeline, models, speed and duration. The token metrics live in protobuf blobs with no public schema, so the reader is reverse-engineered and **fails loudly** if the format drifts (it warns when steps stop parsing, and flags models with no LiteLLM price rather than silently costing $0). Adds `--period 24h` / `1 day`. Thanks **@louisvolant** ([#3](https://github.com/thiga-co/tokstat/pull/3)).
 - **1.18.2** — Fix (opencode): read opencode's new **SQLite storage** (`opencode.db`). Recent opencode versions replaced the JSON `storage/message/…` layout, so tokstat found no data on up-to-date installs. The reader now auto-detects the backend (current `session_message` schema → intermediate `message`+`part` → legacy JSON), opens the DB read-only, and also surfaces opencode tool calls in `--tool-use`. Thanks **@louisvolant** ([#2](https://github.com/thiga-co/tokstat/pull/2)).
@@ -466,6 +466,16 @@ available history.
 ## Pricing
 
 Model pricing is fetched from [LiteLLM's model pricing database](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) and cached at `~/.cache/token-usage/litellm_prices.json` for 24 hours. Falls back to stale cache if fetch fails.
+
+## Caches
+
+tokstat writes a few regenerable caches under `~/.cache/` — all safe to delete:
+
+- `~/.cache/token-usage/litellm_prices.json` — LiteLLM pricing (24 h TTL).
+- `~/.cache/token-usage/ecologits_models.json` — EcoLogits model database (for `--impact`).
+- `~/.cache/token-usage/update_check.json` — last seen PyPI version.
+- `~/.cache/token-usage/antigravity_index.json` — parsed Antigravity step metadata, keyed by each DB's mtime + size so unchanged databases are not re-decoded on the next run. Contains **numeric aggregates only** (token counts, model names, project paths — no prompts or transcripts), is written **only if Antigravity data is present**, and is pruned to stay under 64 MB. Delete it to force a full re-parse.
+- `~/.cache/tokstat/web/` — conversations imported from claude.ai / ChatGPT exports.
 
 ## Diagnostics
 
